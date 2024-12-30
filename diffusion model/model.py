@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, einsum
-from f import exists, Upsample, default, Downsample, Alpha, linear_beta_schedule
 from tqdm import tqdm
 
 
@@ -336,7 +335,7 @@ def reverse_sampling(model, x, t, t_index, alpha = None):
 
 
 def reverse_process(model, shape, timesteps = 1000):
-    device = 'cpu'
+    device = next(model.parameters()).device
 
     batch_size = shape[0]
 
@@ -347,9 +346,39 @@ def reverse_process(model, shape, timesteps = 1000):
         for t in tqdm(reversed(range(1, 1001)), desc='sampling loop time step', total=timesteps):
             img = reverse_sampling(model, img, torch.full((batch_size,),t, dtype=torch.long, device=device), t)
             imgs.append(img.to('cpu'))
+            torch.save(img.to('cpu'), 'results/image_step_'+str(t)+'.pt')
 
     return img
 
 
 def sample(model, image_size, batch_size=16, channels=3):
     return reverse_process(model, shape=(batch_size, channels, image_size, image_size))
+
+
+class EMA():
+    def __init__(self, model, decay=0.9999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {name: param.clone().detach() for name, param in model.named_parameters() if param.requires_grad}
+
+    def to(self, device):
+        for name in self.shadow:
+            self.shadow[name] = self.shadow[name].to(device)
+
+    def update(self):
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    self.shadow[name].mul_(self.decay).add_(param.data, alpha=1 - self.decay)
+
+    def apply_shadow(self):
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    param.data.copy_(self.shadow[name])
+
+    def reset(self):
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    self.shadow[name].copy_(param.data)
