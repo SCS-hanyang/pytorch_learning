@@ -4,6 +4,8 @@ from einops.layers.torch import Rearrange
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+from torchvision.transforms import Compose, Lambda, ToPILImage
+import numpy as np
 
 
 
@@ -93,3 +95,17 @@ def num_to_groups(num, divisor):
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+def image_show(image_file):
+
+    reverse_transform = Compose([
+        Lambda(lambda t: (t + 1).clamp(-1, 1) / 2),  # [-1,1] -> [0,1], clamp로 안전 처리
+        Lambda(lambda t: (t * 255).clamp(0, 255)),  # [0,1] -> [0,255]
+        Lambda(lambda t: t.permute(1, 2, 0)),  # (C,H,W)->(H,W,C)
+        Lambda(lambda t: t.numpy().astype(np.uint8)),
+        ToPILImage(),
+    ])
+
+    loaded_image = torch.load(image_file).to('cpu')
+    random_index = 8
+    image = reverse_transform(loaded_image[random_index])
+    image.show()

@@ -6,7 +6,8 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import os
 #from google.colab import drive
-from model import diffusion_loss, UNet, EMA
+from model import diffusion_loss, UNet, EMA, sample
+from f import image_show
 
 cifar10_mean = (0.4914, 0.4822, 0.4465)
 cifar10_std = (0.2470, 0.2435, 0.2616)
@@ -91,4 +92,19 @@ for epoch in range(epochs):
         #!cp mini_batch_loss.pth /content/drive/MyDrive/
 
     scheduler.step()
+
+
+
+import numpy as np
+from torchvision.transforms import Compose, Lambda, ToPILImage
+from PIL import Image
+
+'''
+model.eval()
+ema.shadow = torch.load("ema_shadow.pth", weights_only=True)
+ema.apply_shadow()
+imgs = sample(model, 32)
+'''
+
+image_show('image_step_1.pt')
 

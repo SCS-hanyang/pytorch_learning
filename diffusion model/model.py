@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, einsum
 from tqdm import tqdm
+from f import exists, Upsample, Downsample, default, Alpha, linear_beta_schedule
 
 
 class PreNorm(nn.Module):
@@ -302,6 +303,7 @@ def diffusion_loss(diffusion_model, x, t, noise=None, loss_type = 'l2'):
 
     x_noisy = forward_sampling(x, t, noise=noise)
     predict_loss = diffusion_model(x_noisy, t)
+    print(predict_loss[0])
 
     if loss_type == "l1":
         loss = F.l1_loss(predict_loss, noise)
