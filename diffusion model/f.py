@@ -3,10 +3,12 @@ import torch.nn as nn
 from einops.layers.torch import Rearrange
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm
+from grpc import stream_stream_rpc_method_handler
+from torch.optim import Optimizer
 from torchvision.transforms import Compose, Lambda, ToPILImage
 import numpy as np
-
+import os
+from tqdm import tqdm
 
 
 def exists(x):
@@ -36,11 +38,12 @@ def linear_beta_schedule(time_steps):
 
     return torch.linspace(min_beta, max_beta, time_steps)
 
+
 def constant_beta_schedule(time_steps):
 
     beta = 0.001
 
-    return torch.tensotr((beta,)*time_steps)
+    return torch.tensor((beta,)*time_steps)
 
 def quadratic_beta_schedule(time_steps):
 
@@ -48,6 +51,52 @@ def quadratic_beta_schedule(time_steps):
     max_beta = 0.02
 
     return torch.linspace(min_beta**0.5, max_beta**0.5, time_steps)**2
+
+
+class cosine_Alpha():
+    def __init__(self, T_max=1000, s = 0.008):
+        steps = T_max + 1
+        x = torch.linspace(0, T_max, steps)
+        alphas_cumprod = torch.cos((x + s / T_max + s) * torch.pi / 2) ** 2
+        alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+        self.alphas_cumprod = alphas_cumprod[1:]
+        self.alphas = alphas_cumprod[1:] / alphas_cumprod[:-1]
+        self.betas = (1 - self.alphas).clamp(0, 0.999)
+        self.sqrt_alphas = torch.sqrt(self.alphas_cumprod)
+        self.one_minus_alphas = 1 - alphas_cumprod[1:]
+        self.one_minus_alphas_prev = 1 - alphas_cumprod[:-1]
+        self.posterior_variance = self.betas * self.one_minus_alphas_prev / self.one_minus_alphas
+
+    def sqrt_alphas_extract(self, t):
+        batch_size = t.shape[0]
+        alphas = self.sqrt_alphas.gather(-1, t.cpu()-1)
+
+        return torch.reshape(alphas, (batch_size, 1, 1, 1)).to(t.device)
+
+
+    def sqrt_one_minus_alphas_extract(self, t):
+        batch_size = t.shape[0]
+        alphas = self.one_minus_alphas.gather(-1, t.cpu()-1)
+
+        return torch.reshape(torch.sqrt(alphas), (batch_size, 1, 1, 1)).to(t.device)
+
+    def alphas_extract(self,t):
+        batch_size = t.shape[0]
+        alphas = self.alphas.gather(-1, t.cpu()-1)
+
+        return torch.reshape(alphas, (batch_size, 1, 1, 1)).to(t.device)
+
+    def posterior_variance_extract(self,t):
+        batch_size = t.shape[0]
+        alphas = self.posterior_variance.gather(-1, t.cpu()-1)
+
+        return torch.reshape(alphas, (batch_size, 1, 1, 1)).to(t.device)
+
+def extract(t, values):
+    batch_size = t.shape[0]
+    value = values.gather(-1, t.cpu())
+
+    return torch.reshape(value, (batch_size, 1,1,1)).to(t.device)
 
 class Alpha():
     def __init__(self, beta_schedule):
@@ -84,6 +133,7 @@ class Alpha():
 
         return torch.reshape(alphas, (batch_size, 1, 1, 1)).to(t.device)
 
+
 def num_to_groups(num, divisor):
     groups = num // divisor
     remainder = num & divisor
@@ -95,12 +145,34 @@ def num_to_groups(num, divisor):
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+def check_point_return(model, ema, scheduler, optimizer, restart = None):
+
+    if restart == None:
+        return 0, 0, float('inf')
+
+
+    checkpoint_path = "checkpoint.pth"
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    ema.shadow = checkpoint['ema_shadow']
+
+    start_epoch = checkpoint['epoch']
+    start_step = checkpoint['step']
+    best_loss = checkpoint.get('best_loss', float('inf'))
+
+    return start_epoch, start_step, best_loss
+
 def image_show(image_file):
 
+
     reverse_transform = Compose([
-        Lambda(lambda t: (t + 1).clamp(-1, 1) / 2),  # [-1,1] -> [0,1], clamp로 안전 처리
-        Lambda(lambda t: (t * 255).clamp(0, 255)),  # [0,1] -> [0,255]
-        Lambda(lambda t: t.permute(1, 2, 0)),  # (C,H,W)->(H,W,C)
+        Lambda(lambda t: (t + 1) / 2),  # values range from [-1, 1] to [0, 1]
+        Lambda(lambda t: t.permute(1, 2, 0)),
+        Lambda(lambda t: t * 255.),  # values range from [0, 1] to [0, 255]
         Lambda(lambda t: t.numpy().astype(np.uint8)),
         ToPILImage(),
     ])
@@ -109,3 +181,37 @@ def image_show(image_file):
     random_index = 8
     image = reverse_transform(loaded_image[random_index])
     image.show()
+
+def image_save():
+    steps = 1000
+
+    cifar10_mean = (0.4914, 0.4822, 0.4465)
+    cifar10_std = (0.2470, 0.2435, 0.2616)
+
+    denormalize = Compose([
+        Lambda(lambda t: t * torch.tensor(cifar10_std, device=t.device).view(3, 1, 1)),  # 표준편차 곱하기
+        Lambda(lambda t: t + torch.tensor(cifar10_mean, device=t.device).view(3, 1, 1)),  # 평균 더하기
+        Lambda(lambda t: t.clamp(0, 1)),  # 값 범위 [0, 1]로 제한
+        ToPILImage(),  # PIL 이미지로 변환
+    ])
+
+    for step in range(16):
+
+        os.mkdir('image/image '+str(step+1))
+
+    for step in tqdm(range(steps), total = steps):
+        str_step = str(step+1)
+        if len(str_step) == 1:
+            str_step = '000'+str_step
+        elif len(str_step) == 2:
+            str_step = '00'+str_step
+        elif len(str_step) == 3:
+            str_step = '0'+str_step
+
+        imgs = torch.load('results1/image_step_'+str(step+1)+'.pt').to('cpu')
+
+        for i in range(imgs.shape[0]):
+            img = imgs[i]
+            img = denormalize(img)
+            img.save('image/image '+str(i+1)+"/"+str(step+1)+"step image.png", format="PNG")
+

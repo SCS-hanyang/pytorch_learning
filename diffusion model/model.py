@@ -83,10 +83,10 @@ class Attention(nn.Module):
 
         if resolution == 16:
             head = 4
-            dim_head = 32
+            dim_head = int(channel / head)
         elif resolution == 4:       # 계산 시간 너무 오래 걸리면 16 32로 바꾸기
-            head = 8
-            dim_head = 64
+            head = 16
+            dim_head = int(channel / head)
         else :
             raise Exception("The attention layer is not appropriately positioned.")
 
@@ -152,8 +152,8 @@ class UNet(nn.Module):
             self,
             dim = 64,
             channel = 3,
-            init_channel = 64,
             out_dim = 3,
+            dim_schedule = (1,2,4,8),
             self_condition = False,
             drop_out = 0.1,
     ):
@@ -163,10 +163,10 @@ class UNet(nn.Module):
         self.self_condition = self_condition
         input_channel = channel * (2 if self_condition else 1)
 
-        self.dims = (64, 128, 256, 256)
+        self.dims = tuple(dim * t for t in dim_schedule)
         self.resolutions = (32, 16, 8, 4)
 
-        self.init_conv = nn.Conv2d(input_channel, init_channel, 3, padding=1)
+        self.init_conv = nn.Conv2d(input_channel, self.dims[0], 3, padding=1)
 
         time_dim = dim * 4
 
@@ -303,7 +303,6 @@ def diffusion_loss(diffusion_model, x, t, noise=None, loss_type = 'l2'):
 
     x_noisy = forward_sampling(x, t, noise=noise)
     predict_loss = diffusion_model(x_noisy, t)
-    print(predict_loss[0])
 
     if loss_type == "l1":
         loss = F.l1_loss(predict_loss, noise)
